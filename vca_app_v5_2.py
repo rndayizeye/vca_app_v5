@@ -16,7 +16,7 @@ SYPHILIS_DURATIONS = {
 }
 
 SEX_TYPES = ['Oral', 'Anal', 'Vaginal']
-DIAGNOSIS_OPTIONS = ['Primary Syphilis', 'Secondary Syphilis', 'Early Latent Syphilis', 'Late Latent Syphilis', 'Neurosyphilis', 'Congenital Syphilis', 'Unknown', 'No Diagnosis']
+DIAGNOSIS_OPTIONS = ['Primary Syphilis', 'Secondary Syphilis', 'Early Latent Syphilis', 'Late Latent Syphilis']
 SYMPTOM_TYPES = ['Primary Chancre', 'Secondary Rash/Lesions'] # Simplified symptom types
 FREQUENCY_UNITS = ['Day', 'Week', 'Month']
 
