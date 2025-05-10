@@ -296,16 +296,15 @@ app.layout = html.Div([
 
 # --- Input Form Callbacks ---
 @callback(
-    Output('patient-data-store', 'data', allow_duplicate=True),
-    Input('patient-name', 'value'), Input('patient-reason', 'value'),
-    Input('patient-diagnosis', 'value'), Input('patient-elicited-exposure-start', 'date'),
-    Input('patient-elicited-exposure-end', 'date'), State('patient-data-store', 'data'),
+    Output('patient-data-store', 'data', allow_duplicate=True), Input('patient-reason', 'value'),
+    Input('patient-diagnosis', 'value'), # I need to move the elicited_start, elicited_end#
+    Input('patient-name', 'value'), State('patient-data-store', 'data'),
     prevent_initial_call=True
 )
-def update_patient_basic_info(name, reason, diagnosis, elicited_start, elicited_end, patient_data):
+def update_patient_basic_info(name, reason, diagnosis,  patient_data): # I need to move the elicited_start, elicited_end#
     if not isinstance(patient_data, dict): patient_data = DEFAULT_PATIENT_DATA.copy()
     patch = Patch(); patch['name'] = name; patch['reason'] = reason; patch['diagnosis'] = diagnosis
-    patch['elicited_exposure_start'] = elicited_start; patch['elicited_exposure_end'] = elicited_end
+     # I need to move the elicited_start, elicited_end#
     return patch
 
 @callback(
@@ -360,17 +359,19 @@ def add_patient_treatment(n_clicks, date, details, patient_data):
 
 @callback(
     Output('current-partner-form-store', 'data'),
-    Input('partner-name', 'value'), Input('partner-first-exposure', 'date'),
+    Input('partner-name', 'value'), Input('patient-elicited-exposure-start', 'date'),
+    Input('patient-elicited-exposure-end', 'date'), Input('partner-first-exposure', 'date'), #Add exposures from patient persepective (4 more inputs)#
     Input('partner-last-exposure', 'date'), Input('partner-freq-value', 'value'),
     Input('partner-freq-unit', 'value'), Input('partner-sex-types', 'value'),
     Input('partner-diagnosis', 'value'), State('current-partner-form-store', 'data'),
     prevent_initial_call=True
 )
-def update_current_partner_form_basic(name, first_exp, last_exp, freq_val, freq_unit, sex_types, diagnosis, current_data):
+def update_current_partner_form_basic(name, partner_first_exp, partner_last_exp, partner_freq_val, freq_unit, patient_elicited_start, patient_elicited_end,sex_types, diagnosis, current_data):
     if not isinstance(current_data, dict): current_data = DEFAULT_PARTNER_DATA.copy()
     patch = Patch()
-    patch['name'] = name; patch['first_exposure'] = first_exp; patch['last_exposure'] = last_exp
-    patch['frequency_value'] = freq_val; patch['frequency_unit'] = freq_unit
+    patch['name'] = name; patch['partner_first_exposure'] = partner_first_exp; patch['partner_last_exposure'] = partner_last_exp 
+    patch['patient_elicited_exposure_start'] = patient_elicited_start; patch['patient_elicited_exposure_end'] = patient_elicited_end #Add exposures from patient persepective (4 more inputs)#
+    patch['frequency_value'] = partner_freq_val; patch['frequency_unit'] = freq_unit
     patch['sex_types'] = sex_types if sex_types else []; patch['diagnosis'] = diagnosis
     return patch
 
@@ -396,7 +397,7 @@ def add_partner_form_lab(n_clicks, date, type, result, partner_form_data):
     State('partner-symptom-duration', 'value'), State('current-partner-form-store', 'data'),
     prevent_initial_call=True
 )
-def add_partner_form_symptom(n_clicks, type, onset, duration, partner_form_data):
+def add_partner_form_symptom(n_clicks, type, onset, duration, partner_form_data): # I need to add ghosted leasion to the list from the start
     patch = Patch()
     if not isinstance(partner_form_data, dict): partner_form_data = DEFAULT_PARTNER_DATA.copy()
     current_symptoms = safe_get_list(partner_form_data, 'symptoms'); updated_symptoms_list = current_symptoms[:]
@@ -408,7 +409,8 @@ def add_partner_form_symptom(n_clicks, type, onset, duration, partner_form_data)
              elif type == 'Secondary Rash/Lesions': duration_days = SYPHILIS_DURATIONS['secondary']['max']
         new_symptom = {'type': type, 'onset': onset, 'duration': duration_days}; updated_symptoms_list.append(new_symptom); patch['symptoms'] = updated_symptoms_list
     display_items = [html.Li(f"{s.get('onset','?')}: {s.get('type','?')} (Duration: {s.get('duration','N/A')} days)") for s in updated_symptoms_list]
-    return patch, display_items
+    #add a line to display ghosted lesions
+    return patch, display_items #, display_ghosted_lesions
 
 @callback(
     Output('current-partner-form-store', 'data', allow_duplicate=True),
@@ -491,9 +493,9 @@ def update_saved_partners_display(partners_list):
     Output('partner-freq-value', 'value', allow_duplicate=True), Output('partner-freq-unit', 'value', allow_duplicate=True),
     Output('partner-sex-types', 'value', allow_duplicate=True), Output('partner-diagnosis', 'value', allow_duplicate=True),
     Input('edit-partner-select', 'value'), State('partners-data-store', 'data'),
-    prevent_initial_call=True
+    prevent_initial_call=True #add patient exposures
 )
-def load_partner_for_edit(selected_partner_id, partners_list):
+def load_partner_for_edit(selected_partner_id, partners_list): #add patient exposures
     if not selected_partner_id or not partners_list: raise dash.exceptions.PreventUpdate
     partner_to_load = next((p for p in partners_list if p.get('id') == selected_partner_id), None)
     if not partner_to_load: return (DEFAULT_PARTNER_DATA.copy(), None, None, None, "Error: Partner not found", None, None, None, None, None, [], None)
@@ -535,7 +537,7 @@ def update_vca_plot_main(patient_data, partners_list, show_durations):
     if not isinstance(partners_list, list): partners_list = []
     all_people_data = [patient_data] + partners_list
 
-    all_dates = set() # Use set for efficient unique date collection
+    all_dates = set() # Use set for efficient unique date collection, I need to understand this data type???
     person_names_map = {} # Map ID to display name
 
     # Collect names and dates
@@ -561,15 +563,15 @@ def update_vca_plot_main(patient_data, partners_list, show_durations):
 
         # Exposure dates
         if p_id != 'patient':
-             first_exp = parse_date(person.get('first_exposure'))
-             last_exp = parse_date(person.get('last_exposure'))
-             if first_exp: all_dates.add(first_exp)
-             if last_exp: all_dates.add(last_exp)
+             first_exp = parse_date(person.get('first_exposure')) #need update variable names for exposures
+             last_exp = parse_date(person.get('last_exposure')) #need update variable names for exposures
+             if first_exp: all_dates.add(first_exp) #need update variable names for exposures
+             if last_exp: all_dates.add(last_exp) #need update variable names for exposures
         else: # Patient elicited exposure
-             elicited_start = parse_date(person.get('elicited_exposure_start'))
-             elicited_end = parse_date(person.get('elicited_exposure_end'))
-             if elicited_start: all_dates.add(elicited_start)
-             if elicited_end: all_dates.add(elicited_end)
+             elicited_start = parse_date(person.get('elicited_exposure_start')) #need update variable names for exposures
+             elicited_end = parse_date(person.get('elicited_exposure_end')) #need update variable names for exposures
+             if elicited_start: all_dates.add(elicited_start) #need update variable names for exposures
+             if elicited_end: all_dates.add(elicited_end) #need update variable names for exposures
 
     # Add treatment dates to range calculation if they exist
     for person in all_people_data:
@@ -582,7 +584,7 @@ def update_vca_plot_main(patient_data, partners_list, show_durations):
 
     # Determine plot range
     if not all_dates:
-        min_date_dt = date.today() - timedelta(days=180)
+        min_date_dt = date.today() - timedelta(days=180) #needs revision
         max_date_dt = date.today() + timedelta(days=30)
     else:
         min_date_dt = min(all_dates) - timedelta(days=30)
