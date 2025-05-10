@@ -160,21 +160,17 @@ app.layout = html.Div([
             html.H2("Patient Information"),
             html.Div([
                 html.Label("Optional Name/ID:"),
-                dcc.Input(id='patient-name', type='text', placeholder="e.g., Patient Zero")
+                dcc.Input(id='patient-name', type='text', placeholder="e.g., OP 123")
             ], className='form-row'),
             html.Div([
                 html.Label("Reason for Testing:"),
-                dcc.Input(id='patient-reason', type='text', style={'width': '80%'})
+                dcc.Input(id='patient-reason', type='text', placeholder="e.g., volunteer",style={'width': '80%'})
             ], className='form-row'),
              html.Div([
                 html.Label("Diagnosis:"),
                 dcc.Dropdown(id='patient-diagnosis', options=DIAGNOSIS_OPTIONS, style={'minWidth': '250px'})
             ], className='form-row'),
             html.H4("Patient's Elicited Exposure Period:"),
-            html.Div([
-                 html.Label("First Possible Exposure:"), dcc.DatePickerSingle(id='patient-elicited-exposure-start'),
-                 html.Label("Last Possible Exposure:"), dcc.DatePickerSingle(id='patient-elicited-exposure-end'),
-            ], className='form-row-flex'),
             html.H4("Add Last Lab Result:"),
             html.Div([
                 dcc.DatePickerSingle(id='patient-lab-date', placeholder="Lab Date"),
@@ -210,6 +206,11 @@ app.layout = html.Div([
             ], className='form-row'),
             html.H4("Partner's Report of Exposure w/ Patient:"), # Clarified label
              html.Div([
+                 html.Div([
+                 html.Label("First Possible Exposure:"), dcc.DatePickerSingle(id='patient-elicited-exposure-start'),
+                 html.Label("Last Possible Exposure:"), dcc.DatePickerSingle(id='patient-elicited-exposure-end'),
+            ], className='form-row-flex'),
+           
                  html.Label("First Exposure:"), dcc.DatePickerSingle(id='partner-first-exposure'),
                  html.Label("Last Exposure:"), dcc.DatePickerSingle(id='partner-last-exposure'),
              ], className='form-row-flex'),
