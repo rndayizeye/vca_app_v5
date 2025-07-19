@@ -360,7 +360,7 @@ def add_patient_treatment(n_clicks, date, details, patient_data):
 @callback(
     Output('current-partner-form-store', 'data'),
     Input('partner-name', 'value'), Input('patient-elicited-exposure-start', 'date'),
-    Input('patient-elicited-exposure-end', 'date'), Input('partner-first-exposure', 'date'), #Add exposures from patient persepective (4 more inputs)#
+    Input('patient-elicited-exposure-end', 'date'), Input('partner-first-exposure', 'date'), #Add exposures from patient perspective (4 more inputs)#
     Input('partner-last-exposure', 'date'), Input('partner-freq-value', 'value'),
     Input('partner-freq-unit', 'value'), Input('partner-sex-types', 'value'),
     Input('partner-diagnosis', 'value'), State('current-partner-form-store', 'data'),
@@ -370,7 +370,7 @@ def update_current_partner_form_basic(name, partner_first_exp, partner_last_exp,
     if not isinstance(current_data, dict): current_data = DEFAULT_PARTNER_DATA.copy()
     patch = Patch()
     patch['name'] = name; patch['partner_first_exposure'] = partner_first_exp; patch['partner_last_exposure'] = partner_last_exp 
-    patch['patient_elicited_exposure_start'] = patient_elicited_start; patch['patient_elicited_exposure_end'] = patient_elicited_end #Add exposures from patient persepective (4 more inputs)#
+    patch['patient_elicited_exposure_start'] = patient_elicited_start; patch['patient_elicited_exposure_end'] = patient_elicited_end #Add exposures from patient perspective (4 more inputs)#
     patch['frequency_value'] = partner_freq_val; patch['frequency_unit'] = freq_unit
     patch['sex_types'] = sex_types if sex_types else []; patch['diagnosis'] = diagnosis
     return patch
@@ -397,7 +397,7 @@ def add_partner_form_lab(n_clicks, date, type, result, partner_form_data):
     State('partner-symptom-duration', 'value'), State('current-partner-form-store', 'data'),
     prevent_initial_call=True
 )
-def add_partner_form_symptom(n_clicks, type, onset, duration, partner_form_data): # I need to add ghosted leasion to the list from the start
+def add_partner_form_symptom(n_clicks, type, onset, duration, partner_form_data): # I need to add ghosted lesion to the list from the start
     patch = Patch()
     if not isinstance(partner_form_data, dict): partner_form_data = DEFAULT_PARTNER_DATA.copy()
     current_symptoms = safe_get_list(partner_form_data, 'symptoms'); updated_symptoms_list = current_symptoms[:]
