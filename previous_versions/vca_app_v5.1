@@ -1,0 +1,989 @@
+import dash
+from dash import dcc, html, Input, Output, State, ctx, callback, ALL, MATCH, Patch
+import plotly.graph_objects as go
+from datetime import datetime, timedelta, date
+import uuid # For unique IDs for partners/components if needed later
+import math # For midpoint calculations
+
+# --- Constants ---
+SYPHILIS_DURATIONS = {
+    # Durations in days
+    'incubation': {'min': 10, 'avg': 21, 'max': 90},
+    'primary': {'min': 7, 'avg': 21, 'max': 35}, # Chancre duration
+    'latency': {'min': 0, 'avg': 28, 'max': 70}, # Between primary and secondary
+    'secondary': {'min': 14, 'avg': 28, 'max': 42} # Symptom duration
+}
+
+SEX_TYPES = ['Oral', 'Anal', 'Vaginal']
+DIAGNOSIS_OPTIONS = ['Primary Syphilis', 'Secondary Syphilis', 'Early Latent Syphilis', 'Late Latent Syphilis', 'Neurosyphilis', 'Congenital Syphilis', 'Unknown', 'No Diagnosis']
+SYMPTOM_TYPES = ['Primary Chancre', 'Secondary Rash/Lesions'] # Simplified symptom types
+FREQUENCY_UNITS = ['Day', 'Week', 'Month']
+
+# --- Helper Functions ---
+
+def parse_date(date_str):
+    """Safely parse date strings, returning date object or None."""
+    if not date_str: return None
+    try:
+        if isinstance(date_str, date): return date_str # Already date object
+        return datetime.strptime(str(date_str).split('T')[0], '%Y-%m-%d').date()
+    except (ValueError, TypeError): return None
+
+def safe_get_list(data, key):
+    """Safely get a list from a dict, returning empty list if key missing or not list."""
+    val = data.get(key, [])
+    return val if isinstance(val, list) else []
+
+def format_timedelta(td):
+    """Format timedelta into a human-readable string"""
+    if not isinstance(td, timedelta): return ""
+    days = td.days
+    if days >= 7:
+        weeks = days // 7
+        rem_days = days % 7
+        return f"{weeks} week(s)" + (f", {rem_days} day(s)" if rem_days else "")
+    return f"{days} day(s)"
+
+def get_symptom_rank(symptom_type):
+    """Assigns rank based on ghosting hierarchy"""
+    if symptom_type == 'Primary Chancre': return 1 # Existing primary is highest
+    # Add logic here if you distinguish past vs current chancres later
+    # Add logic for Ghosted lesions if they become selectable symptoms
+    elif symptom_type == 'Secondary Rash/Lesions': return 4
+    return 99 # Lowest rank for others
+
+def get_avg_inoculation_date(symptom_onset, symptom_type):
+    """Calculate the average estimated inoculation date based on a symptom"""
+    onset = parse_date(symptom_onset)
+    if not onset: return None
+
+    avg_incubation = timedelta(days=SYPHILIS_DURATIONS['incubation']['avg'])
+    avg_primary_duration = timedelta(days=SYPHILIS_DURATIONS['primary']['avg'])
+    avg_latency = timedelta(days=SYPHILIS_DURATIONS['latency']['avg'])
+
+    if symptom_type == 'Primary Chancre':
+        # Inoculation is avg incubation period before onset
+        return onset - avg_incubation
+    elif symptom_type == 'Secondary Rash/Lesions':
+        # Inoculation = Onset - AvgSecondaryOnsetFromInoculation
+        # AvgSecondaryOnset = AvgIncubation + AvgPrimaryDuration + AvgLatency
+        avg_secondary_onset_from_inoc = avg_incubation + avg_primary_duration + avg_latency
+        return onset - avg_secondary_onset_from_inoc
+    return None
+
+def get_chancre_midpoint_date(symptom_onset, symptom_duration_days, symptom_type):
+    """Calculate the midpoint date of a primary chancre (real or ghosted)"""
+    onset = parse_date(symptom_onset)
+    if not onset or symptom_type != 'Primary Chancre': return None
+
+    # Use average duration if specific duration not provided or invalid
+    duration = symptom_duration_days if isinstance(symptom_duration_days, int) and symptom_duration_days > 0 else SYPHILIS_DURATIONS['primary']['avg']
+    midpoint_offset = timedelta(days=duration / 2)
+    return onset + midpoint_offset
+
+# --- App Initialization ---
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
+server = app.server
+
+# --- Initial Data Structures ---
+DEFAULT_PATIENT_DATA = {
+    'id': 'patient', 'name': '', 'reason': '', 'diagnosis': None,
+    'labs': [], 'symptoms': [], 'treatments': [], 'ghosted_lesions': []
+}
+DEFAULT_PARTNER_DATA = {
+    'id': None, 'name': '', 'diagnosis': None,
+    'first_exposure': None, 'last_exposure': None,
+    'frequency_value': None, 'frequency_unit': None, 'sex_types': [],
+    'labs': [], 'symptoms': [], 'treatments': [], 'ghosted_lesions': []
+}
+
+# --- App Layout ---
+app.layout = html.Div([
+    html.H1("Syphilis VCA & Ghosting Analysis Tool"),
+
+    # --- Data Stores ---
+    dcc.Store(id='patient-data-store', data=DEFAULT_PATIENT_DATA),
+    dcc.Store(id='partners-data-store', data=[]), # List of partner dicts
+    dcc.Store(id='current-partner-form-store', data=DEFAULT_PARTNER_DATA), # Holds data for the partner form being edited
+
+    # --- Main Content Area ---
+    html.Div([
+
+        # == Patient Input Section ==
+        html.Div([
+            html.H2("Patient Information"),
+            html.Div([
+                html.Label("Optional Name/ID:"),
+                dcc.Input(id='patient-name', type='text', placeholder="e.g., Patient Zero")
+            ], className='form-row'),
+            html.Div([
+                html.Label("Reason for Testing:"),
+                dcc.Input(id='patient-reason', type='text', style={'width': '80%'})
+            ], className='form-row'),
+             html.Div([
+                html.Label("Diagnosis:"),
+                dcc.Dropdown(id='patient-diagnosis', options=DIAGNOSIS_OPTIONS)
+            ], className='form-row'),
+
+            # Simplified Inputs for Lists (Add Last Item)
+            html.H4("Add Last Lab Result:"),
+            html.Div([
+                dcc.DatePickerSingle(id='patient-lab-date', placeholder="Lab Date"),
+                dcc.Input(id='patient-lab-type', placeholder="Lab Type (e.g., RPR)"),
+                dcc.Input(id='patient-lab-result', placeholder="Result (e.g., 1:16)"),
+                html.Button("Add Lab", id='patient-add-lab-btn', n_clicks=0)
+            ], className='form-row-flex'),
+             html.Div(id='patient-labs-list', style={'marginLeft': '20px', 'fontSize': 'small'}), # Display area
+
+            html.H4("Add Last Symptom:"),
+             html.Div([
+                dcc.Dropdown(id='patient-symptom-type', options=SYMPTOM_TYPES, placeholder="Symptom Type", style={'minWidth': '180px'}),
+                dcc.DatePickerSingle(id='patient-symptom-onset', placeholder="Onset Date"),
+                dcc.Input(id='patient-symptom-duration', type='number', placeholder="Duration (days, optional)"),
+                 html.Button("Add Symptom", id='patient-add-symptom-btn', n_clicks=0)
+            ], className='form-row-flex'),
+             html.Div(id='patient-symptoms-list', style={'marginLeft': '20px', 'fontSize': 'small'}), # Display area
+
+            html.H4("Add Last Treatment:"),
+             html.Div([
+                dcc.DatePickerSingle(id='patient-treatment-date', placeholder="Treatment Date"),
+                dcc.Input(id='patient-treatment-details', placeholder="Treatment Details (e.g., Bicillin 2.4mu)", style={'width': '50%'}),
+                 html.Button("Add Treatment", id='patient-add-treatment-btn', n_clicks=0)
+            ], className='form-row-flex'),
+            html.Div(id='patient-treatments-list', style={'marginLeft': '20px', 'fontSize': 'small'}), # Display area
+
+        ], className='section-box'),
+
+        # == Partner Input Section ==
+        html.Div([
+            html.H2("Partner Information (Enter One Partner at a Time)"),
+            html.Div(id='current-partner-id-display', style={'fontWeight':'bold', 'marginBottom':'10px'}), # Show if editing
+            html.Div([
+                html.Label("Optional Name/ID:"),
+                dcc.Input(id='partner-name', type='text', placeholder="e.g., Partner A")
+            ], className='form-row'),
+
+            html.H4("Exposure with Patient:"),
+             html.Div([
+                 html.Label("First Exposure:"), dcc.DatePickerSingle(id='partner-first-exposure'),
+                 html.Label("Last Exposure:"), dcc.DatePickerSingle(id='partner-last-exposure'),
+             ], className='form-row-flex'),
+             html.Div([
+                 html.Label("Frequency:"),
+                 dcc.Input(id='partner-freq-value', type='number', placeholder="Value", min=1, step=1, style={'width': '80px'}),
+                 dcc.Dropdown(id='partner-freq-unit', options=FREQUENCY_UNITS, placeholder="Unit", style={'minWidth': '100px'}),
+             ], className='form-row-flex'),
+             html.Div([
+                 html.Label("Sex Type(s):"),
+                 dcc.Checklist(id='partner-sex-types', options=SEX_TYPES, inline=True)
+             ], className='form-row'),
+
+             html.Div([
+                html.Label("Partner Diagnosis:"),
+                dcc.Dropdown(id='partner-diagnosis', options=DIAGNOSIS_OPTIONS)
+            ], className='form-row'),
+
+            # Simplified Inputs for Partner Lists
+            html.H4("Add Last Partner Lab Result:"),
+            html.Div([
+                dcc.DatePickerSingle(id='partner-lab-date', placeholder="Lab Date"),
+                dcc.Input(id='partner-lab-type', placeholder="Lab Type"),
+                dcc.Input(id='partner-lab-result', placeholder="Result"),
+                html.Button("Add Partner Lab", id='partner-add-lab-btn', n_clicks=0)
+            ], className='form-row-flex'),
+            html.Div(id='partner-labs-list', style={'marginLeft': '20px', 'fontSize': 'small'}),
+
+            html.H4("Add Last Partner Symptom:"),
+             html.Div([
+                 dcc.Dropdown(id='partner-symptom-type', options=SYMPTOM_TYPES, placeholder="Symptom Type", style={'minWidth': '180px'}),
+                 dcc.DatePickerSingle(id='partner-symptom-onset', placeholder="Onset Date"),
+                 dcc.Input(id='partner-symptom-duration', type='number', placeholder="Duration (days, optional)"),
+                 html.Button("Add Partner Symptom", id='partner-add-symptom-btn', n_clicks=0)
+            ], className='form-row-flex'),
+            html.Div(id='partner-symptoms-list', style={'marginLeft': '20px', 'fontSize': 'small'}),
+
+            html.H4("Add Last Partner Treatment:"),
+             html.Div([
+                dcc.DatePickerSingle(id='partner-treatment-date', placeholder="Treatment Date"),
+                dcc.Input(id='partner-treatment-details', placeholder="Treatment Details", style={'width': '50%'}),
+                 html.Button("Add Partner Treatment", id='partner-add-treatment-btn', n_clicks=0)
+            ], className='form-row-flex'),
+            html.Div(id='partner-treatments-list', style={'marginLeft': '20px', 'fontSize': 'small'}),
+
+            # Partner Save/Clear Buttons
+            html.Div([
+                html.Button("Save Partner to List / Update Selected", id='save-partner-btn', n_clicks=0, style={'marginRight': '10px'}),
+                html.Button("Clear Partner Form", id='clear-partner-form-btn', n_clicks=0)
+            ], style={'marginTop': '20px'})
+
+        ], className='section-box'),
+
+    ], style={'display': 'flex', 'flexDirection': 'row', 'gap': '20px'}),
+
+    # == Saved Partners List & Selection for Edit ==
+    html.Div([
+        html.H3("Saved Partners"),
+        html.Div(id='saved-partners-list-display'), # Will be populated by callback
+        dcc.Dropdown(id='edit-partner-select', placeholder="Select Partner to Edit/View", style={'marginTop':'10px'})
+    ], className='section-box', style={'marginTop': '20px'}),
+
+
+    # == VCA Plot ==
+    html.Div([
+        html.H2("Visual Case Analysis Timeline"),
+        dcc.Graph(id='vca-graph')
+    ], className='section-box', style={'marginTop': '20px'}),
+
+    # == Ghosting Analysis ==
+    html.Div([
+        html.H2("Ghosting Analysis"),
+        html.Div([
+            html.Label("Select Saved Partner to compare with Patient:"),
+            dcc.Dropdown(id='ghosting-partner-select') # Options populated by callback
+        ], style={'marginBottom': '10px'}),
+        html.Button("Run Ghosting Analysis", id='run-ghosting-btn', n_clicks=0),
+        html.Div(id='ghosting-result-output', style={'marginTop': '15px', 'whiteSpace': 'pre-wrap', 'border': '1px dashed #ccc', 'padding': '10px'})
+    ], className='section-box', style={'marginTop': '20px'}),
+
+    # == Clear All Data ==
+     html.Div([
+         html.Button("Clear All Patient and Partner Data", id='clear-all-data-btn', n_clicks=0, style={'color': 'red', 'marginTop': '30px'})
+     ]),
+
+
+], style={'padding': '20px'})
+
+
+# --- Callbacks ---
+
+# Callback to update patient data store (simplified: update on any change)
+@callback(
+    Output('patient-data-store', 'data', allow_duplicate=True),
+    Input('patient-name', 'value'),
+    Input('patient-reason', 'value'),
+    Input('patient-diagnosis', 'value'),
+    State('patient-data-store', 'data'),
+    prevent_initial_call=True
+)
+def update_patient_basic_info(name, reason, diagnosis, patient_data):
+    patient_data['name'] = name
+    patient_data['reason'] = reason
+    patient_data['diagnosis'] = diagnosis
+    return patient_data
+
+# Callback to add patient lab
+@callback(
+    Output('patient-data-store', 'data', allow_duplicate=True),
+    Output('patient-labs-list', 'children'),
+    Input('patient-add-lab-btn', 'n_clicks'),
+    State('patient-lab-date', 'date'),
+    State('patient-lab-type', 'value'),
+    State('patient-lab-result', 'value'),
+    State('patient-data-store', 'data'),
+    prevent_initial_call=True
+)
+def add_patient_lab(n_clicks, date, type, result, patient_data):
+    if date and type and result:
+        new_lab = {'date': date, 'type': type, 'result': result}
+        patient_data['labs'] = safe_get_list(patient_data, 'labs') + [new_lab]
+
+    # Update display list
+    display_items = [html.Li(f"{l['date']}: {l['type']} - {l['result']}") for l in safe_get_list(patient_data, 'labs')]
+    return patient_data, display_items
+
+
+# Callback to add patient symptom
+@callback(
+    Output('patient-data-store', 'data', allow_duplicate=True),
+    Output('patient-symptoms-list', 'children'),
+    Input('patient-add-symptom-btn', 'n_clicks'),
+    State('patient-symptom-type', 'value'),
+    State('patient-symptom-onset', 'date'),
+    State('patient-symptom-duration', 'value'),
+    State('patient-data-store', 'data'),
+    prevent_initial_call=True
+)
+def add_patient_symptom(n_clicks, type, onset, duration, patient_data):
+    onset_date = parse_date(onset)
+    if type and onset_date:
+        duration_days = int(duration) if duration else None # Use None if blank
+        # Use max duration if not provided and applicable (Primary/Secondary)
+        if duration_days is None:
+             if type == 'Primary Chancre': duration_days = SYPHILIS_DURATIONS['primary']['max']
+             elif type == 'Secondary Rash/Lesions': duration_days = SYPHILIS_DURATIONS['secondary']['max']
+
+        new_symptom = {'type': type, 'onset': onset, 'duration': duration_days}
+        patient_data['symptoms'] = safe_get_list(patient_data, 'symptoms') + [new_symptom]
+
+    # Update display list
+    display_items = [
+        html.Li(f"{s['onset']}: {s['type']} (Duration: {s.get('duration','N/A')} days)")
+        for s in safe_get_list(patient_data, 'symptoms')
+    ]
+    return patient_data, display_items
+
+
+# Callback to add patient treatment
+@callback(
+    Output('patient-data-store', 'data', allow_duplicate=True),
+    Output('patient-treatments-list', 'children'),
+    Input('patient-add-treatment-btn', 'n_clicks'),
+    State('patient-treatment-date', 'date'),
+    State('patient-treatment-details', 'value'),
+    State('patient-data-store', 'data'),
+    prevent_initial_call=True
+)
+def add_patient_treatment(n_clicks, date, details, patient_data):
+     if date and details:
+        new_treatment = {'date': date, 'details': details}
+        patient_data['treatments'] = safe_get_list(patient_data, 'treatments') + [new_treatment]
+
+     # Update display list
+     display_items = [html.Li(f"{t['date']}: {t['details']}") for t in safe_get_list(patient_data, 'treatments')]
+     return patient_data, display_items
+
+# == Callbacks for Partner Form Data Handling ==
+
+# Update the temporary partner form store whenever a field changes
+@callback(
+    Output('current-partner-form-store', 'data'),
+    # Inputs for all partner form fields
+    Input('partner-name', 'value'),
+    Input('partner-first-exposure', 'date'),
+    Input('partner-last-exposure', 'date'),
+    Input('partner-freq-value', 'value'),
+    Input('partner-freq-unit', 'value'),
+    Input('partner-sex-types', 'value'),
+    Input('partner-diagnosis', 'value'),
+    # Need states for lists as they are only updated by button clicks
+    State('current-partner-form-store', 'data'),
+    prevent_initial_call=True
+)
+def update_current_partner_form_basic(name, first_exp, last_exp, freq_val, freq_unit, sex_types, diagnosis, current_data):
+    # Patch avoids overwriting list data managed by button clicks
+    patch = Patch()
+    patch['name'] = name
+    patch['first_exposure'] = first_exp
+    patch['last_exposure'] = last_exp
+    patch['frequency_value'] = freq_val
+    patch['frequency_unit'] = freq_unit
+    patch['sex_types'] = sex_types if sex_types else []
+    patch['diagnosis'] = diagnosis
+    # Labs, symptoms, treatments handled by their 'add' buttons updating the store directly
+    return patch
+
+# Callbacks to add items to the *current* partner form's lists in the store
+@callback(
+    Output('current-partner-form-store', 'data', allow_duplicate=True),
+    Output('partner-labs-list', 'children'),
+    Input('partner-add-lab-btn', 'n_clicks'),
+    State('partner-lab-date', 'date'),
+    State('partner-lab-type', 'value'),
+    State('partner-lab-result', 'value'),
+    State('current-partner-form-store', 'data'),
+    prevent_initial_call=True
+)
+def add_partner_form_lab(n_clicks, date, type, result, partner_form_data):
+    patch = Patch()
+    if date and type and result:
+        new_lab = {'date': date, 'type': type, 'result': result}
+        current_labs = safe_get_list(partner_form_data, 'labs')
+        patch['labs'] = current_labs + [new_lab]
+
+    display_items = [html.Li(f"{l['date']}: {l['type']} - {l['result']}") for l in patch.get('labs', safe_get_list(partner_form_data, 'labs'))]
+    return patch, display_items
+
+# Add Partner Symptom to Form Store
+@callback(
+    Output('current-partner-form-store', 'data', allow_duplicate=True),
+    Output('partner-symptoms-list', 'children'),
+    Input('partner-add-symptom-btn', 'n_clicks'),
+    State('partner-symptom-type', 'value'),
+    State('partner-symptom-onset', 'date'),
+    State('partner-symptom-duration', 'value'),
+    State('current-partner-form-store', 'data'),
+    prevent_initial_call=True
+)
+def add_partner_form_symptom(n_clicks, type, onset, duration, partner_form_data):
+    patch = Patch()
+    onset_date = parse_date(onset)
+    if type and onset_date:
+        duration_days = int(duration) if duration else None
+        if duration_days is None:
+             if type == 'Primary Chancre': duration_days = SYPHILIS_DURATIONS['primary']['max']
+             elif type == 'Secondary Rash/Lesions': duration_days = SYPHILIS_DURATIONS['secondary']['max']
+        new_symptom = {'type': type, 'onset': onset, 'duration': duration_days}
+        current_symptoms = safe_get_list(partner_form_data, 'symptoms')
+        patch['symptoms'] = current_symptoms + [new_symptom]
+
+    display_items = [html.Li(f"{s['onset']}: {s['type']} (Duration: {s.get('duration','N/A')} days)") for s in patch.get('symptoms', safe_get_list(partner_form_data, 'symptoms'))]
+    return patch, display_items
+
+# Add Partner Treatment to Form Store
+@callback(
+    Output('current-partner-form-store', 'data', allow_duplicate=True),
+    Output('partner-treatments-list', 'children'),
+    Input('partner-add-treatment-btn', 'n_clicks'),
+    State('partner-treatment-date', 'date'),
+    State('partner-treatment-details', 'value'),
+    State('current-partner-form-store', 'data'),
+    prevent_initial_call=True
+)
+def add_partner_form_treatment(n_clicks, date, details, partner_form_data):
+    patch = Patch()
+    if date and details:
+        new_treatment = {'date': date, 'details': details}
+        current_treatments = safe_get_list(partner_form_data, 'treatments')
+        patch['treatments'] = current_treatments + [new_treatment]
+
+    display_items = [html.Li(f"{t['date']}: {t['details']}") for t in patch.get('treatments', safe_get_list(partner_form_data, 'treatments'))]
+    return patch, display_items
+
+
+# == Callback to Save/Update Partner in Main Store ==
+@callback(
+    Output('partners-data-store', 'data', allow_duplicate=True),
+    Output('current-partner-form-store', 'data', allow_duplicate=True), # Clear form on save
+    # Also clear the display lists for the partner form
+    Output('partner-labs-list', 'children', allow_duplicate=True),
+    Output('partner-symptoms-list', 'children', allow_duplicate=True),
+    Output('partner-treatments-list', 'children', allow_duplicate=True),
+    Output('current-partner-id-display', 'children', allow_duplicate=True),
+     # Clear form inputs explicitly
+    Output('partner-name', 'value', allow_duplicate=True),
+    Output('partner-first-exposure', 'date', allow_duplicate=True),
+    Output('partner-last-exposure', 'date', allow_duplicate=True),
+    Output('partner-freq-value', 'value', allow_duplicate=True),
+    Output('partner-freq-unit', 'value', allow_duplicate=True),
+    Output('partner-sex-types', 'value', allow_duplicate=True),
+    Output('partner-diagnosis', 'value', allow_duplicate=True),
+    # Reset button states for list items might be needed if not clearing store
+    Input('save-partner-btn', 'n_clicks'),
+    State('current-partner-form-store', 'data'),
+    State('partners-data-store', 'data'),
+    prevent_initial_call=True
+)
+def save_or_update_partner(n_clicks, partner_form_data, partners_list):
+    if not partner_form_data or not (partner_form_data.get('name') or partner_form_data.get('id')):
+        # Don't save if no name/id, maybe show an error?
+        # For now, just don't save and don't clear form
+         raise dash.exceptions.PreventUpdate
+
+    partners_list = partners_list if partners_list else []
+    partner_id = partner_form_data.get('id')
+
+    if partner_id: # Existing partner is being updated
+        updated_list = []
+        for p in partners_list:
+            if p.get('id') == partner_id:
+                # Update existing entry with current form data
+                 updated_list.append(partner_form_data.copy())
+            else:
+                 updated_list.append(p)
+        partners_list = updated_list
+    else: # New partner
+        new_id = str(uuid.uuid4()) # Generate a unique ID
+        partner_form_data['id'] = new_id
+        partners_list.append(partner_form_data.copy())
+
+    # Reset the form store and display lists, clear basic inputs
+    return (partners_list, DEFAULT_PARTNER_DATA.copy(),
+            None, None, None, # Clear display lists
+            "", # Clear ID display
+            # Explicitly clear inputs
+            None, None, None, None, None, None, None)
+
+
+# Callback to Clear Partner Form
+@callback(
+    Output('current-partner-form-store', 'data', allow_duplicate=True),
+    Output('partner-labs-list', 'children', allow_duplicate=True),
+    Output('partner-symptoms-list', 'children', allow_duplicate=True),
+    Output('partner-treatments-list', 'children', allow_duplicate=True),
+    Output('current-partner-id-display', 'children', allow_duplicate=True),
+    # Clear form inputs explicitly
+    Output('partner-name', 'value', allow_duplicate=True),
+    Output('partner-first-exposure', 'date', allow_duplicate=True),
+    Output('partner-last-exposure', 'date', allow_duplicate=True),
+    Output('partner-freq-value', 'value', allow_duplicate=True),
+    Output('partner-freq-unit', 'value', allow_duplicate=True),
+    Output('partner-sex-types', 'value', allow_duplicate=True),
+    Output('partner-diagnosis', 'value', allow_duplicate=True),
+    Input('clear-partner-form-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
+def clear_partner_form(n_clicks):
+     return (DEFAULT_PARTNER_DATA.copy(), None, None, None, "",
+            None, None, None, None, None, None, None)
+
+
+# Callback to populate saved partners list and edit dropdown
+@callback(
+    Output('saved-partners-list-display', 'children'),
+    Output('edit-partner-select', 'options'),
+    Output('ghosting-partner-select', 'options'), # Update ghosting dropdown too
+    Input('partners-data-store', 'data') # Trigger when partners list changes
+)
+def update_saved_partners_display(partners_list):
+    partners_list = partners_list if partners_list else []
+    if not partners_list:
+        display = html.P("No partners saved yet.")
+        options = []
+    else:
+        display_items = []
+        options = []
+        for p in partners_list:
+             name = p.get('name', f"Partner ID: {p.get('id')}")
+             display_items.append(html.Li(name))
+             options.append({'label': name, 'value': p.get('id')})
+        display = html.Ul(display_items)
+
+    return display, options, options # Same options for both dropdowns
+
+# Callback to load selected partner into the form for editing
+@callback(
+    Output('current-partner-form-store', 'data', allow_duplicate=True),
+    Output('partner-labs-list', 'children', allow_duplicate=True),
+    Output('partner-symptoms-list', 'children', allow_duplicate=True),
+    Output('partner-treatments-list', 'children', allow_duplicate=True),
+    Output('current-partner-id-display', 'children', allow_duplicate=True),
+    # Set form input values explicitly
+    Output('partner-name', 'value', allow_duplicate=True),
+    Output('partner-first-exposure', 'date', allow_duplicate=True),
+    Output('partner-last-exposure', 'date', allow_duplicate=True),
+    Output('partner-freq-value', 'value', allow_duplicate=True),
+    Output('partner-freq-unit', 'value', allow_duplicate=True),
+    Output('partner-sex-types', 'value', allow_duplicate=True),
+    Output('partner-diagnosis', 'value', allow_duplicate=True),
+    Input('edit-partner-select', 'value'), # Trigger when selection changes
+    State('partners-data-store', 'data'),
+    prevent_initial_call=True
+)
+def load_partner_for_edit(selected_partner_id, partners_list):
+    if not selected_partner_id or not partners_list:
+        raise dash.exceptions.PreventUpdate
+
+    partner_to_load = next((p for p in partners_list if p.get('id') == selected_partner_id), None)
+
+    if not partner_to_load:
+         # Should not happen if dropdown is synced, but handle defensively
+        return (DEFAULT_PARTNER_DATA.copy(), None, None, None, "Error: Partner not found",
+                None, None, None, None, None, None, None)
+
+    # Update display lists for the loaded partner
+    labs_display = [html.Li(f"{l['date']}: {l['type']} - {l['result']}") for l in safe_get_list(partner_to_load, 'labs')]
+    symptoms_display = [html.Li(f"{s['onset']}: {s['type']} (Duration: {s.get('duration','N/A')} days)") for s in safe_get_list(partner_to_load, 'symptoms')]
+    treatments_display = [html.Li(f"{t['date']}: {t['details']}") for t in safe_get_list(partner_to_load, 'treatments')]
+    id_display = f"Editing: {partner_to_load.get('name', selected_partner_id)}"
+
+    # Return the partner data to the form store and set input values
+    return (partner_to_load.copy(), labs_display, symptoms_display, treatments_display, id_display,
+            # Set form field values explicitly
+            partner_to_load.get('name'),
+            partner_to_load.get('first_exposure'),
+            partner_to_load.get('last_exposure'),
+            partner_to_load.get('frequency_value'),
+            partner_to_load.get('frequency_unit'),
+            partner_to_load.get('sex_types', []),
+            partner_to_load.get('diagnosis')
+            )
+
+
+# == Callback to Update VCA Plot ==
+@callback(
+    Output('vca-graph', 'figure'),
+    Input('patient-data-store', 'data'),
+    Input('partners-data-store', 'data')
+    # Potentially add input from ghosting results later to show ghosted lesions
+)
+def update_vca_plot(patient_data, partners_list):
+    fig = go.Figure()
+    all_people_data = [patient_data] + (partners_list if partners_list else [])
+    all_dates = []
+    person_names = []
+
+    # Collect names and dates
+    for person in all_people_data:
+         name = person.get('name') or person.get('id') or 'Unknown'
+         if person.get('id') == 'patient': name += " (Patient)"
+         person_names.append(name)
+
+         for key in ['labs', 'symptoms', 'treatments']:
+             for item in safe_get_list(person, key):
+                 dt = parse_date(item.get('date') or item.get('onset'))
+                 if dt: all_dates.append(dt)
+         # Exposure dates for partners
+         if person.get('id') != 'patient':
+              first_exp = parse_date(person.get('first_exposure'))
+              last_exp = parse_date(person.get('last_exposure'))
+              if first_exp: all_dates.append(first_exp)
+              if last_exp: all_dates.append(last_exp)
+
+    # Determine plot range
+    if not all_dates:
+        min_date_dt = date.today() - timedelta(days=180)
+        max_date_dt = date.today() + timedelta(days=30)
+    else:
+        min_date_dt = min(all_dates) - timedelta(days=30)
+        max_date_dt = max(all_dates) + timedelta(days=30)
+
+    # Define plot elements
+    colors = {'lab': 'blue', 'symptom': 'red', 'treatment': 'green', 'exposure': 'purple'}
+    symbols = {'lab': 'circle', 'symptom': 'triangle-up', 'treatment': 'star'}
+
+    # Plot data
+    plotted_legend_items = set()
+    y_axis_order = list(reversed(person_names)) # Patient usually plotted higher
+
+    for person_data in all_people_data:
+        person_id = person_data.get('id', 'unknown')
+        name = person_data.get('name') or person_id
+        if person_id == 'patient': name += " (Patient)"
+        y_val = name # Use unique name for y-axis
+
+        # Plot Labs, Symptoms, Treatments as markers
+        for event_type, event_key, date_key, details_key_func in [
+            ('lab', 'labs', 'date', lambda item: f"{item.get('type','?')} - {item.get('result','?')}" ),
+            ('symptom', 'symptoms', 'onset', lambda item: f"{item.get('type','?')} (Dur: {item.get('duration','N/A')}d)"),
+            ('treatment', 'treatments', 'date', lambda item: item.get('details','?'))
+        ]:
+            items = safe_get_list(person_data, event_key)
+            dates = [parse_date(item.get(date_key)) for item in items]
+            valid_dates = [d for d in dates if d]
+            valid_details = [details_key_func(item) for item, dt in zip(items, dates) if dt]
+
+            if valid_dates:
+                 show_legend = event_type not in plotted_legend_items
+                 fig.add_trace(go.Scatter(
+                     x=valid_dates, y=[y_val] * len(valid_dates),
+                     mode='markers',
+                     marker=dict(color=colors[event_type], symbol=symbols[event_type], size=10),
+                     name=event_type.capitalize(), legendgroup=event_type, showlegend=show_legend,
+                     hoverinfo='text',
+                     hovertext=[f"<b>{name}</b><br>{event_type.capitalize()}: {dt:%Y-%m-%d}<br>{detail}"
+                                for dt, detail in zip(valid_dates, valid_details)]
+                 ))
+                 if show_legend: plotted_legend_items.add(event_type)
+
+        # Plot Exposure Period for Partners
+        if person_id != 'patient':
+            first_exp = parse_date(person_data.get('first_exposure'))
+            last_exp = parse_date(person_data.get('last_exposure'))
+            if first_exp and last_exp and first_exp <= last_exp:
+                 show_legend = 'exposure' not in plotted_legend_items
+                 hover_detail = f"Exposure: {first_exp:%Y-%m-%d} to {last_exp:%Y-%m-%d}"
+                 # Add frequency/type if available
+                 freq_val = person_data.get('frequency_value')
+                 freq_unit = person_data.get('frequency_unit')
+                 sex_types = person_data.get('sex_types', [])
+                 if freq_val and freq_unit: hover_detail += f"<br>Freq: {freq_val}/{freq_unit}"
+                 if sex_types: hover_detail += f"<br>Types: {', '.join(sex_types)}"
+
+                 fig.add_trace(go.Scatter(
+                    x=[first_exp, last_exp], y=[y_val, y_val], mode='lines',
+                    line=dict(color=colors['exposure'], width=5), name='Exposure Period',
+                    legendgroup='exposure', showlegend=show_legend, hoverinfo='text',
+                    hovertext=f"<b>{name}</b><br>{hover_detail}"
+                 ))
+                 # Caps
+                 fig.add_trace(go.Scatter(
+                     x=[first_exp, last_exp], y=[y_val, y_val], mode='markers',
+                     marker=dict(color=colors['exposure'], size=8, symbol='line-ns'),
+                     showlegend=False, hoverinfo='skip'
+                 ))
+                 if show_legend: plotted_legend_items.add('exposure')
+
+        # TODO: Add plotting for ghosted lesions if implemented
+
+    # Layout
+    fig.update_layout(
+        title='VCA Timeline', xaxis_title='Date', yaxis_title='Person',
+        xaxis=dict(range=[min_date_dt, max_date_dt], type='date'),
+        yaxis=dict(categoryorder='array', categoryarray=y_axis_order),
+        hovermode='closest', legend_title_text='Events',
+        margin=dict(l=200, r=30, t=50, b=50) # Increased left margin
+    )
+    # Add horizontal lines
+    for name in y_axis_order:
+         fig.add_shape(type="line", x0=min_date_dt, y0=name, x1=max_date_dt, y1=name,
+                       line=dict(color="LightGrey", width=1, dash="dot"))
+
+    return fig
+
+# == Ghosting Analysis Callback ==
+@callback(
+    Output('ghosting-result-output', 'children'),
+    # Maybe Output to patient/partner stores to add ghosted lesions later
+    Input('run-ghosting-btn', 'n_clicks'),
+    State('ghosting-partner-select', 'value'), # Partner ID
+    State('patient-data-store', 'data'),
+    State('partners-data-store', 'data'),
+    prevent_initial_call=True
+)
+def perform_ghosting_analysis(n_clicks, selected_partner_id, patient_data, partners_list):
+    if not selected_partner_id: return "Please select a partner to analyze."
+    if not patient_data or not partners_list: return "Patient or partner data is missing."
+
+    partner_data = next((p for p in partners_list if p.get('id') == selected_partner_id), None)
+    if not partner_data: return f"Error: Selected partner (ID: {selected_partner_id}) not found in saved data."
+
+    p1_data, p2_data = None, None
+    result_log = ["Ghosting Analysis Log:"]
+    result_log.append(f"Comparing Patient ({patient_data.get('name','N/A')}) and Partner ({partner_data.get('name','N/A')})")
+
+    # Step 1: Identify P1 (person with highest ranking symptom)
+    patient_symptoms = sorted(safe_get_list(patient_data, 'symptoms'), key=lambda s: get_symptom_rank(s.get('type')))
+    partner_symptoms = sorted(safe_get_list(partner_data, 'symptoms'), key=lambda s: get_symptom_rank(s.get('type')))
+
+    p1_symptom = None
+    p2_symptom_for_comparison = None # The main symptom of the other person
+
+    if not patient_symptoms and not partner_symptoms:
+        return "Cannot perform ghosting: Neither patient nor partner has symptoms recorded."
+
+    # Determine P1 and P2 based on highest ranking symptom
+    if not partner_symptoms or (patient_symptoms and get_symptom_rank(patient_symptoms[0].get('type')) <= get_symptom_rank(partner_symptoms[0].get('type'))):
+        p1_data = patient_data
+        p2_data = partner_data
+        p1_symptom = patient_symptoms[0]
+        p2_symptom_for_comparison = partner_symptoms[0] if partner_symptoms else None
+        result_log.append(f"P1 is Patient (Symptom: {p1_symptom.get('type')}), P2 is Partner.")
+    else:
+        p1_data = partner_data
+        p2_data = patient_data
+        p1_symptom = partner_symptoms[0]
+        p2_symptom_for_comparison = patient_symptoms[0] if patient_symptoms else None
+        result_log.append(f"P1 is Partner (Symptom: {p1_symptom.get('type')}), P2 is Patient.")
+
+    p1_symptom_type = p1_symptom.get('type')
+    p1_symptom_onset = parse_date(p1_symptom.get('onset'))
+
+    # Step 2: Calculate D1 (P1's average inoculation date)
+    d1 = get_avg_inoculation_date(p1_symptom_onset, p1_symptom_type)
+    if not d1: return f"Could not calculate P1's average inoculation date (D1) for symptom {p1_symptom_type}."
+    result_log.append(f"Step 2: P1's Avg. Inoculation Date (D1) = {d1:%Y-%m-%d}")
+
+    # Step 3: Calculate Ghosted Source Lesion for P2 based on D1
+    # This lesion represents the symptom P2 would have if P1 infected P2 on date D1.
+    avg_incubation = timedelta(days=SYPHILIS_DURATIONS['incubation']['avg'])
+    avg_primary_duration = timedelta(days=SYPHILIS_DURATIONS['primary']['avg'])
+
+    ghosted_source_onset = d1 + avg_incubation
+    ghosted_source_end = ghosted_source_onset + avg_primary_duration
+    result_log.append(f"Step 3: Ghosted Source Lesion for P2 (if P1 source): {ghosted_source_onset:%Y-%m-%d} to {ghosted_source_end:%Y-%m-%d}")
+
+    # Step 4: Calculate D2 (date at midpoint of P1's *own* potential primary source lesion)
+    d2 = None
+    if p1_symptom_type == 'Primary Chancre':
+        d2 = get_chancre_midpoint_date(p1_symptom_onset, p1_symptom.get('duration'), p1_symptom_type)
+        result_log.append(f"Step 4a: P1 has Primary Chancre. Midpoint Date (D2) = {d2:%Y-%m-%d if d2 else 'N/A'}")
+    elif p1_symptom_type == 'Secondary Rash/Lesions':
+        avg_latency = timedelta(days=SYPHILIS_DURATIONS['latency']['avg'])
+        # Midpoint of primary = onset - avg_latency - (avg_primary_duration / 2)
+        d2_offset = avg_latency + timedelta(days=avg_primary_duration.days / 2)
+        d2 = p1_symptom_onset - d2_offset
+        result_log.append(f"Step 4b: P1 has Secondary Symptom. Calculated Midpoint Date (D2) of preceding primary = {d2:%Y-%m-%d if d2 else 'N/A'}")
+    # TODO: Handle Ghosted symptoms if they are added
+
+    if not d2: return f"Could not calculate P1's midpoint date (D2)."
+
+    # Calculate Ghosted Spread Lesion for P2 based on D2
+    # This lesion represents the symptom P2 *would give* P1 if P2 was the source.
+    # We estimate when P2's primary chancre would have started to cause P1's symptom.
+    ghosted_spread_onset = d2 - timedelta(days=avg_primary_duration.days / 2) # Backtrack from midpoint
+    ghosted_spread_end = ghosted_spread_onset + avg_primary_duration
+    result_log.append(f"Step 4c: Ghosted Spread Lesion for P2 (if P2 source): {ghosted_spread_onset:%Y-%m-%d} to {ghosted_spread_end:%Y-%m-%d}")
+
+    # Step 5: Evaluate Scenarios using Criteria
+    result_log.append("\nStep 5: Evaluating Scenarios...")
+
+    # Define P1/P2 exposure dates relative to each other
+    # NOTE: Assumes exposure data is stored on the PARTNER relative to the PATIENT
+    exposure_start, exposure_end = None, None
+    p1_sex_types, p2_sex_types = None, None
+    if p1_data['id'] == 'patient': # P1 is patient, P2 is partner
+         exposure_start = parse_date(p2_data.get('first_exposure'))
+         exposure_end = parse_date(p2_data.get('last_exposure'))
+         p2_sex_types = p2_data.get('sex_types', [])
+    else: # P1 is partner, P2 is patient
+         exposure_start = parse_date(p1_data.get('first_exposure'))
+         exposure_end = parse_date(p1_data.get('last_exposure'))
+         p1_sex_types = p1_data.get('sex_types', []) # Sex types reported by P1 (partner)
+
+    def check_criteria(lesion_type, lesion_onset, lesion_end, person_data, other_person_data):
+        checks = []
+        passed = True
+        person_name = person_data.get('name', person_data.get('id'))
+        other_name = other_person_data.get('name', other_person_data.get('id'))
+        lesion_label = f"{lesion_type} Lesion for {person_name}"
+
+        # 1. Exposure Overlap
+        if exposure_start and exposure_end:
+            # Lesion onset must fall within exposure period
+            if not (exposure_start <= lesion_onset <= exposure_end):
+                checks.append(f"FAIL: {lesion_label} onset ({lesion_onset:%Y-%m-%d}) outside exposure period ({exposure_start:%Y-%m-%d} to {exposure_end:%Y-%m-%d}).")
+                passed = False
+            else:
+                checks.append(f"PASS: {lesion_label} onset within exposure period.")
+        else:
+            checks.append(f"WARN: Cannot check exposure overlap for {lesion_label} - missing exposure dates.")
+            # Allow to proceed but note warning
+
+        # 2. Sex Type Correspondence (Simplified: Check if *any* overlap)
+        # TODO: Needs refinement - map symptom location (if known) to sex types
+        reported_sex_types = p1_sex_types if person_data['id'] != 'patient' else p2_sex_types # Types reported by the partner in the pair
+        if reported_sex_types:
+            # This is a placeholder - requires knowing chancre location vs sex types
+            checks.append(f"INFO: Reported sex types by partner: {', '.join(reported_sex_types)}. (Manual check needed for location correspondence).")
+        else:
+             checks.append(f"WARN: Cannot check sex type correspondence for {lesion_label} - missing partner sex type data.")
+
+        # 3. Latency Check (Ghosted Lesion to Secondary Symptoms)
+        secondary_symptoms = [s for s in safe_get_list(person_data, 'symptoms') if s.get('type') == 'Secondary Rash/Lesions']
+        if secondary_symptoms:
+            earliest_secondary_onset = min(parse_date(s['onset']) for s in secondary_symptoms if parse_date(s['onset']))
+            if earliest_secondary_onset:
+                time_diff = earliest_secondary_onset - lesion_end
+                min_latency_needed = timedelta(days=SYPHILIS_DURATIONS['latency']['min']) # Should be at least 0 days, typically more
+                # Allow some flexibility, standard is ~4 weeks (28 days), minimum could be less
+                if time_diff < min_latency_needed: # Let's use min duration of 0 weeks for basic check
+                     checks.append(f"FAIL: Time between {lesion_label} end ({lesion_end:%Y-%m-%d}) and earliest secondary onset ({earliest_secondary_onset:%Y-%m-%d}) is {format_timedelta(time_diff)}, less than minimum expected latency.")
+                     passed = False
+                else:
+                     checks.append(f"PASS: Sufficient time ({format_timedelta(time_diff)}) between {lesion_label} end and secondary onset.")
+        # If no secondary symptoms, this check passes by default
+
+        # 4. Natural Order Check
+        # - Lesion must occur before any secondary symptoms in that person
+        # - Lesion must occur before treatment in that person
+        person_treatments = safe_get_list(person_data, 'treatments')
+        earliest_treatment_date = min((parse_date(t['date']) for t in person_treatments if parse_date(t['date'])), default=None)
+
+        secondary_check_passed = True
+        if secondary_symptoms:
+             earliest_secondary_onset = min((parse_date(s['onset']) for s in secondary_symptoms if parse_date(s['onset'])), default=None)
+             if earliest_secondary_onset and lesion_onset >= earliest_secondary_onset:
+                 checks.append(f"FAIL: {lesion_label} onset ({lesion_onset:%Y-%m-%d}) occurs on or after secondary onset ({earliest_secondary_onset:%Y-%m-%d}).")
+                 secondary_check_passed = False
+                 passed = False
+
+        treatment_check_passed = True
+        if earliest_treatment_date and lesion_onset >= earliest_treatment_date:
+            checks.append(f"FAIL: {lesion_label} onset ({lesion_onset:%Y-%m-%d}) occurs on or after first treatment date ({earliest_treatment_date:%Y-%m-%d}).")
+            treatment_check_passed = False
+            passed = False
+
+        if secondary_check_passed and treatment_check_passed:
+             checks.append("PASS: Natural order check (Lesion before secondary/treatment).")
+
+        return passed, checks
+
+    # Evaluate Ghosted Source for P2 (P1 is Source)
+    source_scenario_passed, source_checks = check_criteria("Ghosted Source", ghosted_source_onset, ghosted_source_end, p2_data, p1_data)
+    result_log.append("\n--- Scenario: P1 as Source ---")
+    result_log.extend(source_checks)
+
+    # Evaluate Ghosted Spread for P2 (P2 is Source)
+    spread_scenario_passed, spread_checks = check_criteria("Ghosted Spread", ghosted_spread_onset, ghosted_spread_end, p2_data, p1_data)
+    result_log.append("\n--- Scenario: P2 as Source ---")
+    result_log.extend(spread_checks)
+
+    # Determine Final Result
+    final_conclusion = "Result: Unrelated Infections" # Default
+    if source_scenario_passed and not spread_scenario_passed:
+        final_conclusion = f"Result: P1 ({p1_data.get('name', p1_data.get('id'))}) is likely the SOURCE for P2 ({p2_data.get('name', p2_data.get('id'))})."
+    elif spread_scenario_passed and not source_scenario_passed:
+         final_conclusion = f"Result: P2 ({p2_data.get('name', p2_data.get('id'))}) is likely the SOURCE for P1 ({p1_data.get('name', p1_data.get('id'))}).\n(Equivalent to: P1 is likely a SPREAD from P2)."
+    elif source_scenario_passed and spread_scenario_passed:
+         final_conclusion = "Result: Ambiguous - Both Source and Spread scenarios fit the criteria. Further investigation needed."
+    elif not source_scenario_passed and not spread_scenario_passed:
+         # Already default
+         pass
+
+    result_log.append(f"\n--- Conclusion ---")
+    result_log.append(final_conclusion)
+
+    # TODO: Update stores with ghosted lesion info if needed for plotting
+
+    return "\n".join(result_log)
+
+
+# == Callback to Clear All Data ==
+@callback(
+    Output('patient-data-store', 'data', allow_duplicate=True),
+    Output('partners-data-store', 'data', allow_duplicate=True),
+    Output('current-partner-form-store', 'data', allow_duplicate=True),
+    # Clear UI elements
+    Output('patient-name', 'value', allow_duplicate=True),
+    Output('patient-reason', 'value', allow_duplicate=True),
+    Output('patient-diagnosis', 'value', allow_duplicate=True),
+    Output('patient-labs-list', 'children', allow_duplicate=True),
+    Output('patient-symptoms-list', 'children', allow_duplicate=True),
+    Output('patient-treatments-list', 'children', allow_duplicate=True),
+    Output('saved-partners-list-display', 'children', allow_duplicate=True),
+    Output('edit-partner-select', 'options', allow_duplicate=True),
+    Output('edit-partner-select', 'value', allow_duplicate=True),
+    Output('ghosting-partner-select', 'options', allow_duplicate=True),
+    Output('ghosting-partner-select', 'value', allow_duplicate=True),
+    Output('ghosting-result-output', 'children', allow_duplicate=True),
+    Output('vca-graph', 'figure', allow_duplicate=True),
+    # Clear partner form too
+    Output('partner-labs-list', 'children', allow_duplicate=True),
+    Output('partner-symptoms-list', 'children', allow_duplicate=True),
+    Output('partner-treatments-list', 'children', allow_duplicate=True),
+    Output('current-partner-id-display', 'children', allow_duplicate=True),
+    Output('partner-name', 'value', allow_duplicate=True),
+    Output('partner-first-exposure', 'date', allow_duplicate=True),
+    Output('partner-last-exposure', 'date', allow_duplicate=True),
+    Output('partner-freq-value', 'value', allow_duplicate=True),
+    Output('partner-freq-unit', 'value', allow_duplicate=True),
+    Output('partner-sex-types', 'value', allow_duplicate=True),
+    Output('partner-diagnosis', 'value', allow_duplicate=True),
+    Input('clear-all-data-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
+def clear_all_data(n_clicks):
+    empty_figure = go.Figure() # Create an empty figure
+    empty_figure.update_layout(title='VCA Timeline - Data Cleared', xaxis={'visible':False}, yaxis={'visible':False})
+    return (DEFAULT_PATIENT_DATA.copy(), [], DEFAULT_PARTNER_DATA.copy(),
+            None, None, None, # Clear patient fields
+            None, None, None, # Clear patient lists
+            None, [], None, # Clear partner display, options, selection
+            [], None, # Clear ghosting options, selection
+            None, # Clear ghosting result
+            empty_figure, # Clear graph
+            None, None, None, # Clear partner form lists
+            "", # Clear partner ID display
+            None, None, None, None, None, None, None # Clear partner form fields
+            )
+
+
+# --- Run the App ---
+if __name__ == '__main__':
+    # Add some basic CSS for layout
+    app.index_string = '''
+    <!DOCTYPE html>
+    <html>
+        <head>
+            {%metas%}
+            <title>{%title%}</title>
+            {%favicon%}
+            {%css%}
+            <style>
+                .section-box { border: 1px solid #ccc; padding: 15px; margin-bottom: 15px; border-radius: 5px; background-color: #f9f9f9; }
+                .form-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+                .form-row label { font-weight: bold; min-width: 120px; }
+                .form-row-flex { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; } /* No fixed label width */
+            </style>
+        </head>
+        <body>
+            {%app_entry%}
+            <footer>
+                {%config%}
+                {%scripts%}
+                {%renderer%}
+            </footer>
+        </body>
+    </html>
+    '''
+    app.run(debug=True)
